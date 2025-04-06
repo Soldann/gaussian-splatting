@@ -24,6 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 try:
     import wandb
+    from wandb_metrics import RGBMetrics 
     WANDB_FOUND = True
 except ImportError:
     WANDB_FOUND = False
@@ -263,6 +264,20 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                                 },
                                 step=iteration
                                 )
+                        rgb_metrics = RGBMetrics()
+                        (psnr_m, ssim_m, lpips_m) = rgb_metrics(
+                            gt_image.permute(0, 2, 1).unsqueeze(0).to("cuda"),
+                            image.permute(0, 2, 1).unsqueeze(0).to("cuda"),
+                        )
+                        rgb_mse = torch.nn.MSELoss()(gt_image.permute(2, 0, 1), image.permute(2, 0, 1))
+                        wandb.log({
+                            "rgb_mse": float(rgb_mse),
+                            "rgb_psnr": float(psnr_m.item()),
+                            "rgb_ssim": float(ssim_m),
+                            "rgb_lpips": float(lpips_m),
+                            },
+                            step=iteration,
+                        )
 
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
