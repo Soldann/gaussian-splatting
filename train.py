@@ -23,6 +23,11 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 try:
+    import wandb
+    WANDB_FOUND = True
+except ImportError:
+    WANDB_FOUND = False
+try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
@@ -209,6 +214,10 @@ def prepare_output_and_logger(args):
         tb_writer = SummaryWriter(args.model_path)
     else:
         print("Tensorboard not available: not logging progress")
+    if WANDB_FOUND:
+        run = wandb.init(project="midterm-runs_test")
+    else:
+        print("wandb not available: not logging progress")
     return tb_writer
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
@@ -216,6 +225,13 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
+    if WANDB_FOUND:
+        wandb.log({
+            "train_loss_patches/l1_loss": Ll1.item(),
+            "train_loss_patches/total_loss": loss.item(),
+            "iter_time": elapsed,
+            },
+            step=iteration)
 
     # Report test and samples of training set
     if iteration in testing_iterations:
@@ -237,6 +253,17 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    if WANDB_FOUND and (idx < 5):
+                        wandb.log({
+                            "Render Image": wandb.Image(image[None], caption=config['name'] + "_view_{}/render".format(viewpoint.image_name))},
+                            step=iteration)
+                        if iteration == testing_iterations[0]:
+                            wandb.log({
+                                "Ground Truth Image": wandb.Image(gt_image[None], caption=config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name)),
+                                },
+                                step=iteration
+                                )
+
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
@@ -245,10 +272,16 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                if WANDB_FOUND:
+                    wandb.log({config['name'] + '/loss_viewpoint - l1_loss': l1_test}, step=iteration)
+                    wandb.log({config['name'] + '/loss_viewpoint - psnr': psnr_test}, step=iteration)
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        if WANDB_FOUND:
+            wandb.log({"scene/opacity_histogram": wandb.Histogram(scene.gaussians.get_opacity.cpu().squeeze())}, step=iteration)
+            wandb.log({'total_points': scene.gaussians.get_xyz.shape[0]}, step=iteration)
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
