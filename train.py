@@ -24,7 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 try:
     import wandb
-    from wandb_metrics import RGBMetrics 
+    from wandb_metrics import RGBMetrics, DepthMetrics
     WANDB_FOUND = True
 except ImportError:
     WANDB_FOUND = False
@@ -262,8 +262,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             wandb.log({
                                 "Ground Truth Image": wandb.Image(gt_image[None], caption=config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name)),
                                 },
-                                step=iteration
-                                )
+                                step=iteration,
+                            )
                         rgb_metrics = RGBMetrics()
                         (psnr_m, ssim_m, lpips_m) = rgb_metrics(
                             gt_image.permute(0, 2, 1).unsqueeze(0).to("cuda"),
@@ -277,6 +277,20 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                             "rgb_lpips": float(lpips_m),
                             },
                             step=iteration,
+                        )
+                        # depth_image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["depth"], 0.0, 1.0)
+                        depth_image = renderFunc(viewpoint, scene.gaussians, *renderArgs)["depth"]
+                        depth_metrics = DepthMetrics()
+                        # depth_image_gt = torch.clamp(viewpoint.invdepthmap.to("cuda"), 0.0, 1.0)
+                        depth_image_gt = viewpoint.invdepthmap.to("cuda")
+                        (abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3) = depth_metrics(
+                            depth_image.permute(2, 0, 1), depth_image_gt.permute(2, 0, 1)
+                        )
+                        wandb.log({
+                                "Depth Image": wandb.Image((depth_image[None]), caption=config['name'] + "_view_{}/depth".format(viewpoint.image_name)),
+                                "Ground Truth Depth Image": wandb.Image((depth_image_gt[None]), caption=config['name'] + "_view_{}/depth_gt".format(viewpoint.image_name)),
+                                },
+                                step=iteration,
                         )
 
                     l1_test += l1_loss(image, gt_image).mean().double()

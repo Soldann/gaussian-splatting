@@ -22,6 +22,12 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+from scene.dataparsers_utils import (
+    get_train_eval_split_all,
+    get_train_eval_split_filename,
+    get_train_eval_split_fraction,
+    get_train_eval_split_interval,
+)
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -309,7 +315,120 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
                            is_nerf_synthetic=True)
     return scene_info
 
+def readNerfstudioCamerasFromTransforms(path, transformsfile, white_background):
+    train_cam_infos = []
+    test_cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+
+        fovx = 2 * np.arctan(contents["w"] / (2 * contents["fl_x"]))
+
+        frames = contents["frames"]
+
+        # find train and eval indices based on the eval_mode specified
+        eval_mode = "fraction"
+        if eval_mode == "fraction":
+            i_train, i_eval = get_train_eval_split_fraction(frames, train_split_fraction=0.9)
+        elif eval_mode == "filename":
+            i_train, i_eval = get_train_eval_split_filename(frames)
+        elif eval_mode == "interval":
+            i_train, i_eval = get_train_eval_split_interval(frames, eval_interval=8)
+        elif eval_mode == "all":
+            print(
+                "[yellow] Be careful with '--eval-mode=all'. If using camera optimization, the cameras may diverge in the current implementation, giving unpredictable results."
+            )
+            i_train, i_eval = get_train_eval_split_all(frames)
+        else:
+            raise ValueError(f"Unknown eval mode {eval_mode}")
+
+        # Convert to set for faster evaluation
+        i_train = set(i_train)
+        i_eval = set(i_eval)
+
+        for idx, frame in enumerate(frames):
+            cam_name = os.path.join(path, frame["file_path"])
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+            c2w[:3, 1:3] *= -1
+
+            # get the world-to-camera transform and set R, T
+            w2c = np.linalg.inv(c2w)
+            R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+            T = w2c[:3, 3]
+
+            image_path = os.path.join(path, cam_name)
+            image_name = Path(cam_name).stem
+            image = Image.open(image_path)
+
+            im_data = np.array(image.convert("RGBA"))
+
+            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+            fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+            FovY = fovy
+            FovX = fovx
+
+            depth_path =  os.path.join(path, frame["depth_file_path"]) if "depth_file_path" in frame else ""
+
+            if idx in i_train:
+                train_cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+                            image_path=image_path, image_name=image_name,
+                            width=image.size[0], height=image.size[1], depth_path=depth_path, depth_params=None, is_test=False))
+            elif idx in i_eval:
+                test_cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+                            image_path=image_path, image_name=image_name,
+                            width=image.size[0], height=image.size[1], depth_path=depth_path, depth_params=None, is_test=True))
+            else:
+                print("Error in Nerfstudio camera reading: ", idx, " not in train or eval set")
+
+    return train_cam_infos, test_cam_infos
+
+def readNerfstudioInfo(path, white_background, depths, eval, extension=".png"):
+
+    depths_folder=os.path.join(path, depths) if depths != "" else ""
+    print("Reading Transforms")
+    train_cam_infos, test_cam_infos = readNerfstudioCamerasFromTransforms(path, "transforms.json", white_background)
+
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           is_nerf_synthetic=True)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "Nerfstudio" : readNerfstudioInfo,
 }

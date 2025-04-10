@@ -22,7 +22,26 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 
     if cam_info.depth_path != "":
         try:
-            if is_nerf_synthetic:
+            if cam_info.depth_path.endswith(".npy"):
+                invdepthmap = np.load(cam_info.depth_path)
+                # Convert to float32 for processing
+                invdepthmap = invdepthmap.astype(np.float32)
+
+                # Mask out NaN and infinite values
+                mask = np.isfinite(invdepthmap)
+                valid_pixels = invdepthmap[mask]
+
+                # Normalize only valid pixels
+                if valid_pixels.size > 0:
+                    min_val = np.min(valid_pixels)
+                    max_val = np.max(valid_pixels)
+                    normalized = np.zeros_like(invdepthmap, dtype=np.float32)
+                    normalized[mask] = ((invdepthmap[mask] - min_val) / (max_val - min_val)).astype(np.float32)
+                else:
+                    normalized = np.zeros_like(invdepthmap, dtype=np.float32)
+
+                invdepthmap = normalized
+            elif is_nerf_synthetic:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / 512
             else:
                 invdepthmap = cv2.imread(cam_info.depth_path, -1).astype(np.float32) / float(2**16)
